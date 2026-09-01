@@ -58,6 +58,7 @@ func resetKiroConfig(t *testing.T) {
 
 func TestStartKiroLoginDeviceFlow(t *testing.T) {
 	resetKiroConfig(t)
+	// No idc_start_url configured -> login falls back to AWS Builder ID.
 	oldHTTPDo := kiroHTTPDo
 	t.Cleanup(func() { kiroHTTPDo = oldHTTPDo })
 	var deviceAuthBody string
@@ -103,7 +104,8 @@ func TestStartKiroLoginDeviceFlow(t *testing.T) {
 
 func TestStartKiroLoginOrgIdC(t *testing.T) {
 	resetKiroConfig(t)
-	config.Apply(mustConfigRequest(t, "enabled: true\nstart_url: https://d-9067abc.awsapps.com/start\nidc_region: eu-west-1\n"))
+	// A configured idc_start_url switches the login to organization IdC.
+	config.Apply(mustConfigRequest(t, "enabled: true\nidc_start_url: https://d-9067abc.awsapps.com/start\nidc_region: eu-west-1\n"))
 
 	oldHTTPDo := kiroHTTPDo
 	t.Cleanup(func() { kiroHTTPDo = oldHTTPDo })
@@ -140,95 +142,6 @@ func TestStartKiroLoginOrgIdC(t *testing.T) {
 	if !strings.Contains(deviceAuthBody, "https://d-9067abc.awsapps.com/start") {
 		t.Fatalf("org device auth should carry org startUrl, body=%s", deviceAuthBody)
 	}
-}
-
-// decodeLoginStartError expects an error envelope and returns its code.
-func decodeLoginStartError(t *testing.T, raw []byte) string {
-	t.Helper()
-	var env wire.Envelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		t.Fatalf("decode envelope: %v", err)
-	}
-	if env.OK || env.Error == nil {
-		t.Fatalf("expected error envelope, got: %s", string(raw))
-	}
-	return env.Error.Code
-}
-
-func TestStartKiroLoginExplicitBuilderID(t *testing.T) {
-	resetKiroConfig(t)
-	// An explicit Builder ID choice must ignore a leftover start_url and use the
-	// default Builder ID portal.
-	config.Apply(mustConfigRequest(t, "login_method: AWS Builder ID\nstart_url: https://d-9067abc.awsapps.com/start\n"))
-
-	oldHTTPDo := kiroHTTPDo
-	t.Cleanup(func() { kiroHTTPDo = oldHTTPDo })
-	var deviceAuthBody string
-	kiroHTTPDo = func(req hostapi.HTTPRequest) (*hostapi.HTTPResponse, error) {
-		switch {
-		case strings.HasSuffix(req.URL, "/client/register"):
-			return &hostapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"clientId":"cid","clientSecret":"secret"}`)}, nil
-		case strings.HasSuffix(req.URL, "/device_authorization"):
-			deviceAuthBody = string(req.Body)
-			return &hostapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"deviceCode":"dev-1","verificationUriComplete":"https://d.example/","expiresIn":600,"interval":5}`)}, nil
-		default:
-			t.Fatalf("unexpected URL: %s", req.URL)
-			return nil, nil
-		}
-	}
-
-	resp := decodeLoginStart(t, mustStart(t))
-	if metaString(resp.Metadata, "authMethod") != builderIDAuthMethod {
-		t.Fatalf("explicit Builder ID should use builder-id auth method: %+v", resp.Metadata)
-	}
-	if !strings.Contains(deviceAuthBody, builderIDStartURL) {
-		t.Fatalf("explicit Builder ID should use default startUrl, body=%s", deviceAuthBody)
-	}
-}
-
-func TestStartKiroLoginIDCMissingStartURL(t *testing.T) {
-	resetKiroConfig(t)
-	config.Apply(mustConfigRequest(t, "login_method: IDC\n"))
-
-	oldHTTPDo := kiroHTTPDo
-	t.Cleanup(func() { kiroHTTPDo = oldHTTPDo })
-	kiroHTTPDo = func(req hostapi.HTTPRequest) (*hostapi.HTTPResponse, error) {
-		t.Fatalf("IDC without start_url must not perform any HTTP call, got %s", req.URL)
-		return nil, nil
-	}
-
-	if code := decodeLoginStartError(t, mustStart(t)); code != "login_config_missing" {
-		t.Fatalf("expected login_config_missing, got %q", code)
-	}
-}
-
-func TestStartKiroLoginSocialUnsupported(t *testing.T) {
-	for _, method := range []string{"Google", "GitHub"} {
-		t.Run(method, func(t *testing.T) {
-			resetKiroConfig(t)
-			config.Apply(mustConfigRequest(t, "login_method: "+method+"\n"))
-
-			oldHTTPDo := kiroHTTPDo
-			t.Cleanup(func() { kiroHTTPDo = oldHTTPDo })
-			kiroHTTPDo = func(req hostapi.HTTPRequest) (*hostapi.HTTPResponse, error) {
-				t.Fatalf("social login must not perform any HTTP call, got %s", req.URL)
-				return nil, nil
-			}
-
-			if code := decodeLoginStartError(t, mustStart(t)); code != "login_unsupported" {
-				t.Fatalf("expected login_unsupported, got %q", code)
-			}
-		})
-	}
-}
-
-func mustStart(t *testing.T) []byte {
-	t.Helper()
-	raw, err := startKiroLogin([]byte(`{"Provider":"kiro","host_callback_id":"cb-1"}`))
-	if err != nil {
-		t.Fatalf("startKiroLogin: %v", err)
-	}
-	return raw
 }
 
 func mustConfigRequest(t *testing.T, configYAML string) []byte {

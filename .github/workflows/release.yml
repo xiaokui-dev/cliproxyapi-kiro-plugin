@@ -1,0 +1,78 @@
+name: release
+
+# 推送 v<版本> 形式的 tag 时触发，例如 git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  # 每个平台在自己的原生 runner 上编译，避免 CGO c-shared 交叉编译的工具链麻烦。
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-14, goos: darwin, goarch: arm64, lib: kiro.dylib }
+          - { runner: macos-13, goos: darwin, goarch: amd64, lib: kiro.dylib }
+          - { runner: ubuntu-latest, goos: linux, goarch: amd64, lib: kiro.so }
+          - { runner: ubuntu-24.04-arm, goos: linux, goarch: arm64, lib: kiro.so }
+          - { runner: windows-latest, goos: windows, goarch: amd64, lib: kiro.dll }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: 取版本号（去掉 tag 前缀 v）
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: 编译并打包
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -buildmode=c-shared -o "${{ matrix.lib }}" .
+          asset="kiro_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+          # zip 根目录只放动态库，符合商店的 zip 布局要求
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            7z a "$asset" "${{ matrix.lib }}"
+          else
+            zip "$asset" "${{ matrix.lib }}"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zip-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: kiro_*_*.zip
+          if-no-files-found: error
+
+  # 汇总各平台产物，生成 checksums.txt，创建/更新对应 tag 的 Release。
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 生成 checksums.txt
+        working-directory: dist
+        run: sha256sum *.zip | tee checksums.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/checksums.txt
+          generate_release_notes: true

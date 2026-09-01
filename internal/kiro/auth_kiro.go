@@ -110,32 +110,18 @@ func startKiroLogin(request []byte) ([]byte, error) {
 		return nil, errUnmarshal
 	}
 
-	// Choose the login target from the explicit login_method config; when unset,
-	// fall back to the legacy heuristic (start_url set => org IdC, else Builder ID).
+	// The login method is inferred from config rather than chosen explicitly: a
+	// configured idc_start_url means the user wants organization IAM Identity
+	// Center (IdC) login; an empty one falls back to AWS Builder ID. The host's
+	// login entry carries no user choice, so this is the only signal available.
 	cfg := config.Get()
-	target := resolveLoginTarget(cfg.LoginMethod, cfg.StartURL)
-	switch target {
-	case loginTargetSocial:
-		return wire.ErrorStatus("login_unsupported",
-			"Google / GitHub 暂不支持交互登录：请在 Kiro 桌面应用登录后，导出凭据 JSON（含 accessToken/refreshToken/profileArn/authMethod=social/region）放入宿主 auth-dir 导入。",
-			http.StatusNotImplemented), nil
-	case loginTargetIDC:
-		if strings.TrimSpace(cfg.StartURL) == "" {
-			return wire.ErrorStatus("login_config_missing",
-				"IDC 登录需要先在插件配置里填写 start_url（组织 IAM Identity Center 门户 URL）后再发起登录。",
-				http.StatusBadRequest), nil
-		}
-	}
-
-	// Only the IDC path uses start_url; Builder ID always uses its default portal
-	// even if a stale start_url lingers in the config.
 	startURL := ""
 	authMethod := builderIDAuthMethod
-	region := firstNonEmptyStr(cfg.Region, defaultKiroRegion)
-	if target == loginTargetIDC {
-		startURL = cfg.StartURL
+	region := defaultKiroRegion
+	if strings.TrimSpace(cfg.IDCStartURL) != "" {
+		startURL = cfg.IDCStartURL
 		authMethod = idcAuthMethod
-		region = firstNonEmptyStr(cfg.IDCRegion, cfg.Region, defaultKiroRegion)
+		region = firstNonEmptyStr(cfg.IDCRegion, defaultKiroRegion)
 	}
 
 	reg, errRegister := builderIDRegisterClient(req.HostCallbackID, region)
@@ -282,47 +268,6 @@ func buildLoginSuccess(token *oidcTokenResponse, clientID, clientSecret, region,
 			NextRefreshAfter: expiresAt.Add(-refreshLeadTime),
 		},
 	}
-}
-
-// loginTarget is the resolved interactive-login path.
-type loginTarget int
-
-const (
-	loginTargetBuilderID loginTarget = iota
-	loginTargetIDC
-	loginTargetSocial
-)
-
-// resolveLoginTarget maps the config's login_method (with the legacy start_url
-// heuristic as fallback) to a concrete login path. Matching is case-insensitive
-// and tolerant of the "(...)" annotations shown in the dropdown.
-func resolveLoginTarget(loginMethod, startURL string) loginTarget {
-	switch normalizeLoginMethod(loginMethod) {
-	case "aws builder id", "builder id", "builder-id", "builderid":
-		return loginTargetBuilderID
-	case "idc", "iam identity center", "your organization":
-		return loginTargetIDC
-	case "google", "github", "social":
-		return loginTargetSocial
-	case "":
-		// No explicit choice: preserve the historical behavior.
-		if strings.TrimSpace(startURL) != "" {
-			return loginTargetIDC
-		}
-		return loginTargetBuilderID
-	default:
-		return loginTargetBuilderID
-	}
-}
-
-// normalizeLoginMethod lowercases and strips any parenthetical annotation from a
-// login_method value (e.g. "Google (导入)" -> "google").
-func normalizeLoginMethod(v string) string {
-	s := strings.ToLower(strings.TrimSpace(v))
-	if i := strings.IndexByte(s, '('); i >= 0 {
-		s = strings.TrimSpace(s[:i])
-	}
-	return s
 }
 
 // metaString reads a string value from a login metadata map, tolerating the

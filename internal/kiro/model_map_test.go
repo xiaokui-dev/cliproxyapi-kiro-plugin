@@ -121,15 +121,13 @@ func TestKiroModelsForAuthDiscoversAvailableModels(t *testing.T) {
 	}
 }
 
-func TestKiroModelsForAuthReturnsDiscoveryErrors(t *testing.T) {
+func TestKiroModelsForAuthReturnsCredentialErrors(t *testing.T) {
+	// Hard credential errors surface before any network call and must stay errors.
 	tests := []struct {
 		name       string
 		storage    string
-		status     int
-		body       string
 		wantCode   string
 		wantStatus int
-		callHTTP   bool
 	}{
 		{
 			name:       "invalid storage JSON",
@@ -143,43 +141,15 @@ func TestKiroModelsForAuthReturnsDiscoveryErrors(t *testing.T) {
 			wantCode:   "invalid_credential",
 			wantStatus: 400,
 		},
-		{
-			name:       "upstream status",
-			storage:    `{"accessToken":"test-token"}`,
-			status:     403,
-			body:       "bearer token invalid",
-			wantCode:   "upstream_status",
-			wantStatus: 403,
-			callHTTP:   true,
-		},
-		{
-			name:       "invalid response JSON",
-			storage:    `{"accessToken":"test-token"}`,
-			status:     200,
-			body:       "not-json",
-			wantCode:   "upstream_error",
-			wantStatus: 502,
-			callHTTP:   true,
-		},
-		{
-			name:       "empty model list",
-			storage:    `{"accessToken":"test-token"}`,
-			status:     200,
-			body:       `{"models":[]}`,
-			wantCode:   "upstream_error",
-			wantStatus: 502,
-			callHTTP:   true,
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			oldHTTPDo := kiroHTTPDo
 			t.Cleanup(func() { kiroHTTPDo = oldHTTPDo })
-			called := false
 			kiroHTTPDo = func(req hostapi.HTTPRequest) (*hostapi.HTTPResponse, error) {
-				called = true
-				return &hostapi.HTTPResponse{StatusCode: tt.status, Body: []byte(tt.body)}, nil
+				t.Fatalf("HTTP must not be called for credential errors")
+				return nil, nil
 			}
 
 			rawRequest, errMarshal := json.Marshal(authModelRequest{
@@ -192,9 +162,6 @@ func TestKiroModelsForAuthReturnsDiscoveryErrors(t *testing.T) {
 			if errHandle != nil {
 				t.Fatalf("unexpected handler error: %v", errHandle)
 			}
-			if called != tt.callHTTP {
-				t.Fatalf("HTTP called=%v, want %v", called, tt.callHTTP)
-			}
 
 			var envelope wire.Envelope
 			if errUnmarshal := json.Unmarshal(rawResponse, &envelope); errUnmarshal != nil {
@@ -205,6 +172,165 @@ func TestKiroModelsForAuthReturnsDiscoveryErrors(t *testing.T) {
 			}
 			if envelope.Error.Code != tt.wantCode || envelope.Error.HTTPStatus != tt.wantStatus {
 				t.Fatalf("unexpected error: %+v", envelope.Error)
+			}
+		})
+	}
+}
+
+// targetOf reads the x-amz-target operation from a management request.
+func targetOf(req hostapi.HTTPRequest) string {
+	if v := req.Headers["x-amz-target"]; len(v) > 0 {
+		return v[0]
+	}
+	return ""
+}
+
+// TestKiroModelsForAuthDiscoversProfileForIdC covers the IdC path: a credential
+// without a stored profileArn discovers one via ListAvailableProfiles, then uses
+// it to fetch the account-scoped model list.
+func TestKiroModelsForAuthDiscoversProfileForIdC(t *testing.T) {
+	const discovered = "arn:aws:codewhisperer:us-east-1:399359779555:profile/UPGA9WG4MPRN"
+
+	oldHTTPDo := kiroHTTPDo
+	t.Cleanup(func() { kiroHTTPDo = oldHTTPDo })
+	var modelsBody listAvailableModelsRequest
+	kiroHTTPDo = func(req hostapi.HTTPRequest) (*hostapi.HTTPResponse, error) {
+		switch targetOf(req) {
+		case listAvailableProfilesTarget:
+			return &hostapi.HTTPResponse{StatusCode: 200, Body: []byte(
+				`{"profiles":[{"arn":"` + discovered + `","profileName":"QDevProfile-us-east-1"}]}`)}, nil
+		case listAvailableModelsTarget:
+			_ = json.Unmarshal(req.Body, &modelsBody)
+			return &hostapi.HTTPResponse{StatusCode: 200, Body: []byte(
+				`{"models":[{"modelId":"auto","modelName":"Auto"},{"modelId":"claude-sonnet-4.6","modelName":"Claude Sonnet 4.6"}]}`)}, nil
+		default:
+			t.Fatalf("unexpected target: %q", targetOf(req))
+			return nil, nil
+		}
+	}
+
+	rawRequest, _ := json.Marshal(authModelRequest{
+		AuthModelRequest: pluginapi.AuthModelRequest{StorageJSON: []byte(`{"accessToken":"idc-token","authMethod":"IdC"}`)},
+	})
+	rawResponse, errHandle := kiroModelsForAuth(rawRequest)
+	if errHandle != nil {
+		t.Fatalf("unexpected handler error: %v", errHandle)
+	}
+
+	// The discovered ARN must be forwarded to ListAvailableModels.
+	if modelsBody.ProfileArn != discovered {
+		t.Fatalf("expected discovered profileArn %q in models request, got %q", discovered, modelsBody.ProfileArn)
+	}
+
+	var envelope wire.Envelope
+	if errUnmarshal := json.Unmarshal(rawResponse, &envelope); errUnmarshal != nil {
+		t.Fatalf("decode envelope: %v", errUnmarshal)
+	}
+	if !envelope.OK {
+		t.Fatalf("expected OK envelope, got: %s", rawResponse)
+	}
+	var result pluginapi.ModelResponse
+	if errUnmarshal := json.Unmarshal(envelope.Result, &result); errUnmarshal != nil {
+		t.Fatalf("decode model response: %v", errUnmarshal)
+	}
+	// The account-scoped list (2 models), NOT the static catalog.
+	if len(result.Models) != 2 || result.Models[0].ID != "auto" || result.Models[1].ID != "claude-sonnet-4-6" {
+		t.Fatalf("expected account-scoped models [auto, claude-sonnet-4-6], got %+v", result.Models)
+	}
+}
+
+// TestKiroModelsForAuthFallsBackToStaticCatalog covers the graceful degradation:
+// when the account-scoped ListAvailableModels endpoint is unavailable — Builder ID
+// (ListAvailableProfiles denied) or any discovery failure — the plugin must
+// advertise the static catalog rather than return an error, which would make the
+// host unregister every model for the auth.
+func TestKiroModelsForAuthFallsBackToStaticCatalog(t *testing.T) {
+	tests := []struct {
+		name         string
+		storage      string
+		profilesResp *hostapi.HTTPResponse // ListAvailableProfiles reply (nil → not expected)
+		modelsResp   *hostapi.HTTPResponse // ListAvailableModels reply (nil → not expected)
+		wantProfiles bool
+		wantModels   bool
+	}{
+		{
+			name:         "builder id: ListAvailableProfiles denied",
+			storage:      `{"accessToken":"test-token","authMethod":"builder-id"}`,
+			profilesResp: &hostapi.HTTPResponse{StatusCode: 400, Body: []byte(`{"__type":"AccessDeniedException","message":"User is not authorized to access this feature."}`)},
+			wantProfiles: true,
+			wantModels:   false,
+		},
+		{
+			name:         "discovered profile but models status error",
+			storage:      `{"accessToken":"test-token"}`,
+			profilesResp: &hostapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"profiles":[{"arn":"arn:test"}]}`)},
+			modelsResp:   &hostapi.HTTPResponse{StatusCode: 403, Body: []byte("bearer token invalid")},
+			wantProfiles: true,
+			wantModels:   true,
+		},
+		{
+			name:         "discovered profile but models empty",
+			storage:      `{"accessToken":"test-token"}`,
+			profilesResp: &hostapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"profiles":[{"arn":"arn:test"}]}`)},
+			modelsResp:   &hostapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"models":[]}`)},
+			wantProfiles: true,
+			wantModels:   true,
+		},
+		{
+			name:         "stored profileArn but models status error skips discovery",
+			storage:      `{"accessToken":"test-token","profileArn":"arn:stored"}`,
+			modelsResp:   &hostapi.HTTPResponse{StatusCode: 403, Body: []byte("bearer token invalid")},
+			wantProfiles: false,
+			wantModels:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldHTTPDo := kiroHTTPDo
+			t.Cleanup(func() { kiroHTTPDo = oldHTTPDo })
+			var gotProfiles, gotModels bool
+			kiroHTTPDo = func(req hostapi.HTTPRequest) (*hostapi.HTTPResponse, error) {
+				switch targetOf(req) {
+				case listAvailableProfilesTarget:
+					gotProfiles = true
+					return tt.profilesResp, nil
+				case listAvailableModelsTarget:
+					gotModels = true
+					return tt.modelsResp, nil
+				default:
+					t.Fatalf("unexpected target: %q", targetOf(req))
+					return nil, nil
+				}
+			}
+
+			rawRequest, _ := json.Marshal(authModelRequest{
+				AuthModelRequest: pluginapi.AuthModelRequest{StorageJSON: []byte(tt.storage)},
+			})
+			rawResponse, errHandle := kiroModelsForAuth(rawRequest)
+			if errHandle != nil {
+				t.Fatalf("unexpected handler error: %v", errHandle)
+			}
+			if gotProfiles != tt.wantProfiles {
+				t.Fatalf("ListAvailableProfiles called=%v, want %v", gotProfiles, tt.wantProfiles)
+			}
+			if gotModels != tt.wantModels {
+				t.Fatalf("ListAvailableModels called=%v, want %v", gotModels, tt.wantModels)
+			}
+
+			var envelope wire.Envelope
+			if errUnmarshal := json.Unmarshal(rawResponse, &envelope); errUnmarshal != nil {
+				t.Fatalf("decode envelope: %v", errUnmarshal)
+			}
+			if !envelope.OK {
+				t.Fatalf("expected OK envelope, got: %s", rawResponse)
+			}
+			var result pluginapi.ModelResponse
+			if errUnmarshal := json.Unmarshal(envelope.Result, &result); errUnmarshal != nil {
+				t.Fatalf("decode model response: %v", errUnmarshal)
+			}
+			if result.Provider != providerKiro || len(result.Models) != len(kiroModelIDs) {
+				t.Fatalf("expected static catalog (%d models), got provider=%q models=%d", len(kiroModelIDs), result.Provider, len(result.Models))
 			}
 		})
 	}

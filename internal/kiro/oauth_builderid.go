@@ -24,12 +24,6 @@ const (
 	// Center portal ("Your organization" login). Both builder-id and IdC refresh
 	// through the same SSO OIDC token endpoint.
 	idcAuthMethod = "IdC"
-	// loginMethod* are the enum values exposed in the config UI's login_method
-	// dropdown. They select the interactive-login target at login.start time.
-	loginMethodBuilderID = "AWS Builder ID"
-	loginMethodIDC       = "IDC"
-	loginMethodGoogle    = "Google"
-	loginMethodGitHub    = "GitHub"
 	// defaultDeviceExpiresIn / defaultDeviceInterval are fallbacks when the
 	// device_authorization response omits expiresIn / interval.
 	defaultDeviceExpiresIn = 600

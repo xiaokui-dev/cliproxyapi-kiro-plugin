@@ -15,6 +15,7 @@ import (
 const (
 	listAvailableModelsURLTemplate = "https://management.%s.kiro.dev/"
 	listAvailableModelsTarget      = "KiroControlPlaneBearerService.ListAvailableModels"
+	listAvailableProfilesTarget    = "KiroControlPlaneBearerService.ListAvailableProfiles"
 	defaultModelInputTokenLimit    = int64(200000)
 	defaultModelOutputTokenLimit   = int64(8192)
 )
@@ -123,6 +124,18 @@ type listAvailableModelsRequest struct {
 	ProfileArn string `json:"profileArn,omitempty"`
 }
 
+type listAvailableProfilesResponse struct {
+	Profiles []availableProfile `json:"profiles"`
+}
+
+// availableProfile tolerates both field spellings the control plane has used for
+// the ARN (`arn` in current responses, `profileArn` defensively).
+type availableProfile struct {
+	Arn         string `json:"arn"`
+	ProfileArn  string `json:"profileArn"`
+	ProfileName string `json:"profileName"`
+}
+
 type listAvailableModelsResponse struct {
 	Models []availableModel `json:"models"`
 }
@@ -141,8 +154,17 @@ type tokenLimits struct {
 }
 
 // kiroModelsForAuth asks Kiro which models the credential can actually use.
-// The management endpoint is account-scoped by accessToken/profileArn, so the
-// result must not be replaced with a fixed global model list.
+// The management endpoint is account-scoped by accessToken/profileArn, so when
+// it answers we advertise exactly what it returns.
+//
+// Graceful degradation: ListAvailableModels hard-requires a valid profileArn,
+// which AWS Builder ID (free tier) accounts do not have and cannot discover
+// (ListAvailableProfiles returns AccessDenied for them). Chat still works for
+// those accounts without a profileArn, so instead of returning an error — which
+// makes the host UNREGISTER every model for this auth and surfaces as "no models
+// bound" — we fall back to the static catalog. Per-account availability is still
+// enforced upstream at chat time (INVALID_MODEL_ID), consistent with the
+// modelMapping design note above.
 func kiroModelsForAuth(request []byte) ([]byte, error) {
 	var req authModelRequest
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
@@ -158,9 +180,24 @@ func kiroModelsForAuth(request []byte) ([]byte, error) {
 	}
 
 	region := firstNonEmptyStr(cred.Region, cred.IDCRegion, defaultKiroRegion)
+
+	// ListAvailableModels hard-requires a valid profileArn. IdC / organization
+	// accounts have one but the device-code login never captured it, so discover
+	// it now via ListAvailableProfiles. AWS Builder ID accounts are not authorized
+	// for that call (AccessDenied) and yield "", so we advertise the static catalog
+	// instead — their chat works fine without a profileArn, and per-account
+	// availability is enforced upstream at chat time (INVALID_MODEL_ID).
+	profileArn := strings.TrimSpace(cred.ProfileArn)
+	if profileArn == "" {
+		profileArn = discoverProfileArn(cred, req.HostCallbackID, region)
+	}
+	if profileArn == "" {
+		return staticModelsEnvelope()
+	}
+
 	body, errMarshal := json.Marshal(listAvailableModelsRequest{
 		Origin:     originAIEditor,
-		ProfileArn: strings.TrimSpace(cred.ProfileArn),
+		ProfileArn: profileArn,
 	})
 	if errMarshal != nil {
 		return nil, fmt.Errorf("encode list available models request: %w", errMarshal)
@@ -173,23 +210,18 @@ func kiroModelsForAuth(request []byte) ([]byte, error) {
 		Headers:        listAvailableModelsHeaders(cred),
 		Body:           body,
 	})
-	if errDo != nil {
-		return wire.ErrorStatus("upstream_error", "list available models request: "+errDo.Error(), http.StatusBadGateway), nil
-	}
-	if resp == nil {
-		return wire.ErrorStatus("upstream_error", "list available models returned no response", http.StatusBadGateway), nil
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return wire.ErrorStatus("upstream_status", fmt.Sprintf("ListAvailableModels HTTP %d: %s", resp.StatusCode, truncate(string(resp.Body), 300)), resp.StatusCode), nil
+	// On any discovery failure, degrade to the static catalog rather than error.
+	if errDo != nil || resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return staticModelsEnvelope()
 	}
 
 	var decoded listAvailableModelsResponse
 	if errUnmarshal := json.Unmarshal(resp.Body, &decoded); errUnmarshal != nil {
-		return wire.ErrorStatus("upstream_error", "decode ListAvailableModels response: "+errUnmarshal.Error(), http.StatusBadGateway), nil
+		return staticModelsEnvelope()
 	}
 	models := availableModelsToPluginModels(decoded.Models)
 	if len(models) == 0 {
-		return wire.ErrorStatus("upstream_error", "ListAvailableModels returned no usable models", http.StatusBadGateway), nil
+		return staticModelsEnvelope()
 	}
 
 	return wire.OK(pluginapi.ModelResponse{
@@ -198,19 +230,66 @@ func kiroModelsForAuth(request []byte) ([]byte, error) {
 	})
 }
 
+// staticModelsEnvelope wraps the static model catalog in a model.for_auth OK
+// envelope. Used as the fallback when account-scoped discovery is unavailable.
+func staticModelsEnvelope() ([]byte, error) {
+	return wire.OK(pluginapi.ModelResponse{
+		Provider: providerKiro,
+		Models:   kiroModels(),
+	})
+}
+
 func listAvailableModelsHeaders(cred kiroCredential) map[string][]string {
+	return kiroManagementHeaders(cred, listAvailableModelsTarget)
+}
+
+// kiroManagementHeaders builds the AWS-flavored headers for a management.kiro.dev
+// bearer call, differing only by the x-amz-target operation.
+func kiroManagementHeaders(cred kiroCredential, target string) map[string][]string {
 	mid := machineID(cred)
 	return map[string][]string{
 		"Authorization":         {"Bearer " + cred.AccessToken},
 		"Content-Type":          {"application/x-amz-json-1.0"},
 		"Accept":                {"application/json"},
-		"x-amz-target":          {listAvailableModelsTarget},
+		"x-amz-target":          {target},
 		"TokenType":             {"SSO_OIDC"},
 		"amz-sdk-invocation-id": {uuidV4()},
 		"amz-sdk-request":       {"attempt=1; max=3"},
 		"x-amz-user-agent":      {fmt.Sprintf("aws-sdk-js/1.0.34 KiroIDE-%s-%s", kiroVersion, mid)},
 		"user-agent":            {fmt.Sprintf("aws-sdk-js/1.0.34 ua/2.1 os/other lang/js md/nodejs#20.11.0 api/codewhispererstreaming#1.0.34 m/E KiroIDE-%s-%s", kiroVersion, mid)},
 	}
+}
+
+// discoverProfileArn resolves the credential's own profile ARN via
+// ListAvailableProfiles. IdC / organization accounts return their QDevProfile
+// ARN here, which unlocks the account-scoped ListAvailableModels call. AWS
+// Builder ID accounts are not authorized for this operation (AccessDenied) and
+// yield "", signalling the caller to fall back to the static catalog. Any error
+// or empty result is treated as "not discoverable" rather than fatal.
+func discoverProfileArn(cred kiroCredential, callbackID, region string) string {
+	resp, errDo := kiroHTTPDo(hostapi.HTTPRequest{
+		HostCallbackID: callbackID,
+		Method:         http.MethodPost,
+		URL:            fmt.Sprintf(listAvailableModelsURLTemplate, region),
+		Headers:        kiroManagementHeaders(cred, listAvailableProfilesTarget),
+		Body:           []byte("{}"),
+	})
+	if errDo != nil || resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	var decoded listAvailableProfilesResponse
+	if json.Unmarshal(resp.Body, &decoded) != nil {
+		return ""
+	}
+	for _, p := range decoded.Profiles {
+		if arn := strings.TrimSpace(p.ProfileArn); arn != "" {
+			return arn
+		}
+		if arn := strings.TrimSpace(p.Arn); arn != "" {
+			return arn
+		}
+	}
+	return ""
 }
 
 func availableModelsToPluginModels(available []availableModel) []pluginapi.ModelInfo {

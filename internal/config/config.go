@@ -10,16 +10,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config holds the plugin's configurable settings. LoginMethod is the explicit
-// interactive-login target chosen in the management UI; when empty the plugin
-// falls back to the legacy heuristic (StartURL set => org IdC, otherwise AWS
-// Builder ID).
+// Config holds the plugin's configurable settings. The login method is inferred
+// from IDCStartURL rather than chosen explicitly: when it is set, interactive
+// login goes through the organization's IAM Identity Center (IdC); when it is
+// empty, login falls back to AWS Builder ID (a personal account). The
+// CodeWhisperer/OIDC region is not configurable for Builder ID (it always uses
+// the default, us-east-1); IdC uses IDCRegion.
 type Config struct {
-	LoginMethod string `yaml:"login_method"`
-	Region      string `yaml:"region"`
-	StartURL    string `yaml:"start_url"`
+	IDCStartURL string `yaml:"idc_start_url"`
 	IDCRegion   string `yaml:"idc_region"`
-	BaseURL     string `yaml:"base_url"`
 }
 
 var (
@@ -47,11 +46,8 @@ func Apply(request []byte) {
 			return
 		}
 	}
-	cfg.LoginMethod = strings.TrimSpace(cfg.LoginMethod)
-	cfg.Region = strings.TrimSpace(cfg.Region)
-	cfg.StartURL = strings.TrimSpace(cfg.StartURL)
+	cfg.IDCStartURL = strings.TrimSpace(cfg.IDCStartURL)
 	cfg.IDCRegion = strings.TrimSpace(cfg.IDCRegion)
-	cfg.BaseURL = strings.TrimSpace(cfg.BaseURL)
 
 	mu.Lock()
 	current = cfg

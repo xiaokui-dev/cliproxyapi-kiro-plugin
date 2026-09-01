@@ -72,20 +72,8 @@ func kiroRegistration() registration {
 			Author:           "xiaokui-dev",
 			GitHubRepository: "https://github.com/xiaokui-dev/cliproxyapi-kiro-plugin",
 			ConfigFields: []pluginapi.ConfigField{
-				{
-					Name:       "login_method",
-					Type:       pluginapi.ConfigFieldTypeEnum,
-					EnumValues: []string{loginMethodBuilderID, loginMethodIDC, loginMethodGoogle, loginMethodGitHub},
-					Description: "登录方式。AWS Builder ID / IDC 需先保存配置，再到「Kiro OAuth」页选择 Kiro 登录。\n" +
-						"· AWS Builder ID：无需其它配置，保存即可发起设备码登录。\n" +
-						"· IDC：组织 IAM Identity Center 登录，仅需填写 start_url 与 idc_region。\n" +
-						"· Google / GitHub：暂不支持交互登录。请在 Kiro 桌面应用登录后导出凭据 JSON，放入宿主 auth-dir。\n" +
-						"  导入 JSON 需含：accessToken、refreshToken、profileArn、authMethod(=social)、region(通常 us-east-1)；导入后插件会经 Kiro auth service 自动刷新。",
-				},
-				{Name: "region", Type: pluginapi.ConfigFieldTypeString, Description: "CodeWhisperer 端点使用的默认 AWS 区域（默认 us-east-1），所有登录方式通用。"},
-				{Name: "start_url", Type: pluginapi.ConfigFieldTypeString, Description: "仅 IDC 需要：组织 IAM Identity Center 门户 start URL，例如 https://d-xxxx.awsapps.com/start。其它登录方式无需填写。"},
-				{Name: "idc_region", Type: pluginapi.ConfigFieldTypeString, Description: "仅 IDC 需要：组织 IdC OIDC 端点所在 AWS 区域（留空则回退到 region，再回退 us-east-1）。"},
-				{Name: "base_url", Type: pluginapi.ConfigFieldTypeString, Description: "可选：覆盖 generateAssistantResponse 端点 URL（一般无需填写）。"},
+				{Name: "idc_start_url", Type: pluginapi.ConfigFieldTypeString, Description: "Organization IAM Identity Center portal start URL."},
+				{Name: "idc_region", Type: pluginapi.ConfigFieldTypeString, Description: "AWS Region that hosts your Identity Center instance."},
 			},
 		},
 		Capabilities: registrationCapability{
