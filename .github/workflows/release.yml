@@ -19,7 +19,8 @@ jobs:
       matrix:
         include:
           - { runner: macos-14, goos: darwin, goarch: arm64, lib: kiro.dylib }
-          - { runner: macos-13, goos: darwin, goarch: amd64, lib: kiro.dylib }
+          # Intel Mac 的 runner(macos-13)常年排队紧张，改在 arm64 runner 上用 clang 交叉编译 x86_64
+          - { runner: macos-14, goos: darwin, goarch: amd64, lib: kiro.dylib, cc: "clang -arch x86_64" }
           - { runner: ubuntu-latest, goos: linux, goarch: amd64, lib: kiro.so }
           - { runner: ubuntu-24.04-arm, goos: linux, goarch: arm64, lib: kiro.so }
           - { runner: windows-latest, goos: windows, goarch: amd64, lib: kiro.dll }
@@ -41,6 +42,10 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
+          # 需要交叉编译的平台（如 arm64 runner 上编 darwin/amd64）会带 matrix.cc
+          if [ -n "${{ matrix.cc }}" ]; then
+            export CC="${{ matrix.cc }}"
+          fi
           go build -buildmode=c-shared -o "${{ matrix.lib }}" .
           asset="kiro_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
           # zip 根目录只放动态库，符合商店的 zip 布局要求
