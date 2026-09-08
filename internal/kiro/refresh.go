@@ -109,15 +109,31 @@ func refreshKiroAuth(request []byte) ([]byte, error) {
 func performKiroRefresh(callbackID string, cred kiroCredential) (*kiroRefreshResponse, int, error) {
 	isSocial := strings.EqualFold(strings.TrimSpace(cred.AuthMethod), "social")
 
+	// 端点主机由 region 决定,而该请求体携带 refreshToken/clientSecret,
+	// 因此必须先校验 region 再构造 URL,避免凭据被发往非 AWS 主机。
 	var url string
 	var bodyObj map[string]string
 	if isSocial {
-		region := firstNonEmptyStr(cred.Region, defaultKiroRegion)
-		url = fmt.Sprintf(socialRefreshURLTemplate, region)
+		region, errRegion := resolveRegion(cred.Region)
+		if errRegion != nil {
+			return nil, 0, fmt.Errorf("invalid kiro credential region: %w", errRegion)
+		}
+		safeURL, errURL := safeEndpoint(socialRefreshURLTemplate, region, "")
+		if errURL != nil {
+			return nil, 0, fmt.Errorf("invalid kiro refresh endpoint: %w", errURL)
+		}
+		url = safeURL
 		bodyObj = map[string]string{"refreshToken": cred.RefreshToken}
 	} else {
-		region := firstNonEmptyStr(cred.IDCRegion, cred.Region, defaultKiroRegion)
-		url = fmt.Sprintf(idcRefreshURLTemplate, region)
+		region, errRegion := resolveRegion(cred.IDCRegion, cred.Region)
+		if errRegion != nil {
+			return nil, 0, fmt.Errorf("invalid kiro credential region: %w", errRegion)
+		}
+		safeURL, errURL := safeEndpoint(idcRefreshURLTemplate, region, "")
+		if errURL != nil {
+			return nil, 0, fmt.Errorf("invalid kiro refresh endpoint: %w", errURL)
+		}
+		url = safeURL
 		bodyObj = map[string]string{
 			"refreshToken": cred.RefreshToken,
 			"clientId":     cred.ClientID,

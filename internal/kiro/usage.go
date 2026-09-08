@@ -104,7 +104,10 @@ func queryOneUsage(callbackID string, entry hostapi.AuthEntry) usageEntry {
 
 // fetchUsageLimits calls the upstream getUsageLimits endpoint for one credential.
 func fetchUsageLimits(callbackID string, cred kiroCredential) (json.RawMessage, error) {
-	region := firstNonEmptyStr(cred.Region, cred.IDCRegion, defaultKiroRegion)
+	region, errRegion := resolveRegion(cred.Region, cred.IDCRegion)
+	if errRegion != nil {
+		return nil, fmt.Errorf("invalid kiro credential region: %w", errRegion)
+	}
 
 	params := url.Values{}
 	params.Set("isEmailRequired", "true")
@@ -113,7 +116,12 @@ func fetchUsageLimits(callbackID string, cred kiroCredential) (json.RawMessage, 
 	if strings.EqualFold(strings.TrimSpace(cred.AuthMethod), "social") && cred.ProfileArn != "" {
 		params.Set("profileArn", cred.ProfileArn)
 	}
-	fullURL := fmt.Sprintf(usageURLTemplate, region) + "?" + params.Encode()
+	// 请求头携带 accessToken:先校验 region 再拼查询串。
+	base, errURL := safeEndpoint(usageURLTemplate, region, "")
+	if errURL != nil {
+		return nil, fmt.Errorf("invalid kiro usage endpoint: %w", errURL)
+	}
+	fullURL := base + "?" + params.Encode()
 
 	resp, errDo := kiroHTTPDo(hostapi.HTTPRequest{
 		HostCallbackID: callbackID,

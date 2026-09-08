@@ -73,10 +73,15 @@ func builderIDRegisterClient(callbackID, region string) (*oidcRegisterResponse, 
 	if errMarshal != nil {
 		return nil, errMarshal
 	}
+	// region 来自插件配置(idc_region),同样需校验后才能进 authority。
+	registerURL, errURL := safeEndpoint(ssoOIDCEndpointTemplate, region, "/client/register")
+	if errURL != nil {
+		return nil, fmt.Errorf("invalid sso-oidc endpoint: %w", errURL)
+	}
 	resp, errDo := kiroHTTPDo(hostapi.HTTPRequest{
 		HostCallbackID: callbackID,
 		Method:         http.MethodPost,
-		URL:            fmt.Sprintf(ssoOIDCEndpointTemplate, region) + "/client/register",
+		URL:            registerURL,
 		Headers:        map[string][]string{"Content-Type": {"application/json"}, "User-Agent": {"KiroIDE"}},
 		Body:           body,
 	})
@@ -111,10 +116,14 @@ func builderIDStartDeviceAuth(callbackID, region, clientID, clientSecret, startU
 	if errMarshal != nil {
 		return nil, errMarshal
 	}
+	deviceAuthURL, errURL := safeEndpoint(ssoOIDCEndpointTemplate, region, "/device_authorization")
+	if errURL != nil {
+		return nil, fmt.Errorf("invalid sso-oidc endpoint: %w", errURL)
+	}
 	resp, errDo := kiroHTTPDo(hostapi.HTTPRequest{
 		HostCallbackID: callbackID,
 		Method:         http.MethodPost,
-		URL:            fmt.Sprintf(ssoOIDCEndpointTemplate, region) + "/device_authorization",
+		URL:            deviceAuthURL,
 		Headers:        map[string][]string{"Content-Type": {"application/json"}},
 		Body:           body,
 	})
@@ -147,10 +156,15 @@ func builderIDPollToken(callbackID, region, clientID, clientSecret, deviceCode s
 	if errMarshal != nil {
 		return nil, errMarshal
 	}
+	// 该请求体携带 clientSecret,端点必须由校验过的 region 推导。
+	tokenURL, errURL := safeEndpoint(ssoOIDCEndpointTemplate, region, "/token")
+	if errURL != nil {
+		return nil, fmt.Errorf("invalid sso-oidc endpoint: %w", errURL)
+	}
 	resp, errDo := kiroHTTPDo(hostapi.HTTPRequest{
 		HostCallbackID: callbackID,
 		Method:         http.MethodPost,
-		URL:            fmt.Sprintf(ssoOIDCEndpointTemplate, region) + "/token",
+		URL:            tokenURL,
 		Headers:        map[string][]string{"Content-Type": {"application/json"}, "User-Agent": {"KiroIDE"}},
 		Body:           body,
 	})

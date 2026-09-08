@@ -63,8 +63,15 @@ func fetchKiroEvents(request []byte) (*kiroExecResult, []byte, error) {
 	}
 
 	model := firstNonEmptyStr(req.Model, creq.Model)
-	region := firstNonEmptyStr(cred.Region, cred.IDCRegion, defaultKiroRegion)
-	url := fmt.Sprintf(generateURLTemplate, region)
+	// 请求头携带 accessToken,故端点主机必须由校验过的 region 推导。
+	region, errRegion := resolveRegion(cred.Region, cred.IDCRegion)
+	if errRegion != nil {
+		return nil, wire.ErrorStatus("invalid_credential", "invalid kiro credential region: "+errRegion.Error(), http.StatusBadRequest), nil
+	}
+	url, errURL := safeEndpoint(generateURLTemplate, region, "")
+	if errURL != nil {
+		return nil, wire.ErrorStatus("invalid_credential", "invalid kiro endpoint: "+errURL.Error(), http.StatusBadRequest), nil
+	}
 
 	var lastResult *kiroExecResult
 	for attempt := 0; attempt < maxEmptyResponseAttempts; attempt++ {

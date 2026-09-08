@@ -68,7 +68,7 @@ func kiroRegistration() registration {
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
 			Name:             providerKiro,
-			Version:          "0.1.0",
+			Version:          "0.1.1",
 			Author:           "xiaokui-dev",
 			GitHubRepository: "https://github.com/xiaokui-dev/cliproxyapi-kiro-plugin",
 			ConfigFields: []pluginapi.ConfigField{

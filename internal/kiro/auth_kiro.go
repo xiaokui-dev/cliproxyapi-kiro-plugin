@@ -29,6 +29,20 @@ func parseKiroAuth(request []byte) ([]byte, error) {
 		return wire.OK(pluginapi.AuthParseResponse{Handled: false})
 	}
 
+	// 导入即校验:region/idcRegion 之后会被拼进上游端点的 authority,凭据文件
+	// 又可能来自外部。缺省(空)可接受——运行时回退默认区域;但"非空且不合法"
+	// 一定是损坏或投毒,此时拒绝导入,避免坏取值潜伏到后续请求路径。
+	for field, value := range map[string]string{"region": cred.Region, "idcRegion": cred.IDCRegion} {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		if _, errRegion := validateRegion(value); errRegion != nil {
+			return wire.ErrorStatus("invalid_credential",
+				"kiro credential has invalid "+field+": "+errRegion.Error(),
+				http.StatusBadRequest), nil
+		}
+	}
+
 	metadata := map[string]any{
 		"type": providerKiro,
 		// Drives the host's auto-refresh scheduler for plugin providers: with a
@@ -121,7 +135,13 @@ func startKiroLogin(request []byte) ([]byte, error) {
 	if strings.TrimSpace(cfg.IDCStartURL) != "" {
 		startURL = cfg.IDCStartURL
 		authMethod = idcAuthMethod
-		region = firstNonEmptyStr(cfg.IDCRegion, defaultKiroRegion)
+		// 配置里的 idc_region 会进入端点 authority,必须校验;不合法则拒绝登录,
+		// 而不是静默回退到默认区域(那会让用户以为配置生效了)。
+		validRegion, errRegion := validateRegion(firstNonEmptyStr(cfg.IDCRegion, defaultKiroRegion))
+		if errRegion != nil {
+			return wire.ErrorStatus("login_invalid_region", "invalid idc_region: "+errRegion.Error(), http.StatusBadRequest), nil
+		}
+		region = validRegion
 	}
 
 	reg, errRegister := builderIDRegisterClient(req.HostCallbackID, region)
@@ -178,7 +198,14 @@ func pollKiroLogin(request []byte) ([]byte, error) {
 	clientID := metaString(metadata, "clientId")
 	clientSecret := metaString(metadata, "clientSecret")
 	deviceCode := metaString(metadata, "deviceCode")
-	region := firstNonEmptyStr(metaString(metadata, "region"), defaultKiroRegion)
+	// metadata 由宿主按 state 存取后回传,读回时重新校验 region,避免中途被改写。
+	region, errRegion := resolveRegion(metaString(metadata, "region"))
+	if errRegion != nil {
+		return wire.OK(pluginapi.AuthLoginPollResponse{
+			Status:  pluginapi.AuthLoginStatusError,
+			Message: "login session has an invalid region: " + errRegion.Error(),
+		})
+	}
 	authMethod := firstNonEmptyStr(metaString(metadata, "authMethod"), builderIDAuthMethod)
 	if clientID == "" || clientSecret == "" || deviceCode == "" {
 		return wire.OK(pluginapi.AuthLoginPollResponse{

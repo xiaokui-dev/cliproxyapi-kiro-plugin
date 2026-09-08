@@ -179,7 +179,11 @@ func kiroModelsForAuth(request []byte) ([]byte, error) {
 		return wire.ErrorStatus("invalid_credential", "kiro credential has no accessToken", http.StatusBadRequest), nil
 	}
 
-	region := firstNonEmptyStr(cred.Region, cred.IDCRegion, defaultKiroRegion)
+	// region 非法时不发任何请求,退回静态目录(与其他发现失败情形一致)。
+	region, errRegion := resolveRegion(cred.Region, cred.IDCRegion)
+	if errRegion != nil {
+		return staticModelsEnvelope()
+	}
 
 	// ListAvailableModels hard-requires a valid profileArn. IdC / organization
 	// accounts have one but the device-code login never captured it, so discover
@@ -203,10 +207,16 @@ func kiroModelsForAuth(request []byte) ([]byte, error) {
 		return nil, fmt.Errorf("encode list available models request: %w", errMarshal)
 	}
 
+	// 请求头携带 accessToken:region 不合法时退回静态目录,绝不发往未校验主机。
+	modelsURL, errURL := safeEndpoint(listAvailableModelsURLTemplate, region, "")
+	if errURL != nil {
+		return staticModelsEnvelope()
+	}
+
 	resp, errDo := kiroHTTPDo(hostapi.HTTPRequest{
 		HostCallbackID: req.HostCallbackID,
 		Method:         http.MethodPost,
-		URL:            fmt.Sprintf(listAvailableModelsURLTemplate, region),
+		URL:            modelsURL,
 		Headers:        listAvailableModelsHeaders(cred),
 		Body:           body,
 	})
@@ -267,10 +277,15 @@ func kiroManagementHeaders(cred kiroCredential, target string) map[string][]stri
 // yield "", signalling the caller to fall back to the static catalog. Any error
 // or empty result is treated as "not discoverable" rather than fatal.
 func discoverProfileArn(cred kiroCredential, callbackID, region string) string {
+	// 请求头携带 accessToken:region 不合法时视为不可发现,直接返回空。
+	profilesURL, errURL := safeEndpoint(listAvailableModelsURLTemplate, region, "")
+	if errURL != nil {
+		return ""
+	}
 	resp, errDo := kiroHTTPDo(hostapi.HTTPRequest{
 		HostCallbackID: callbackID,
 		Method:         http.MethodPost,
-		URL:            fmt.Sprintf(listAvailableModelsURLTemplate, region),
+		URL:            profilesURL,
 		Headers:        kiroManagementHeaders(cred, listAvailableProfilesTarget),
 		Body:           []byte("{}"),
 	})
